@@ -199,8 +199,12 @@ micro_wake_word:
         id: play_sound
         priority: true
         sound_file: !lambda return id(wake_word_triggered_sound);
-    
-    - delay: 300ms
+    - delay: 250ms
+    - media_player.stop: 
+    - speaker.stop: 
+    - wait_until:
+        condition:
+          speaker.is_stopped: i2s_speaker
     - voice_assistant.start:
         wake_word: !lambda return wake_word;
 
