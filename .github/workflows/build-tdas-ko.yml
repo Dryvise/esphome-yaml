@@ -1,0 +1,42 @@
+name: Build TDAS internal test module
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - tdas-internal-test-build
+    paths:
+      - 'tdas-live-test/**'
+      - '.github/workflows/build-tdas-ko.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build for DSM 7.3 / epyc7002
+        run: |
+          mkdir -p "$PWD/out"
+          docker run --rm \
+            -v "$PWD/tdas-live-test:/input" \
+            -v "$PWD/out:/output" \
+            auxxxilium/syno-compiler:7.3 \
+            compile-module epyc7002
+
+      - name: Inspect module
+        run: |
+          ls -lah out
+          file out/*.ko
+          modinfo out/*.ko || true
+          sha256sum out/*.ko | tee out/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdas_internal_test-epyc7002-dsm7.3
+          path: |
+            out/*.ko
+            out/SHA256SUMS.txt
+          if-no-files-found: error
