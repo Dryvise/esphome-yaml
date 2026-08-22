@@ -8,6 +8,12 @@ on:
     paths:
       - 'tdas-live-test/**'
       - '.github/workflows/build-tdas-ko.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tdas-live-test/**'
+      - '.github/workflows/build-tdas-ko.yml'
 
 jobs:
   build:
