@@ -25,6 +25,7 @@ jobs:
       - name: Build for DSM 7.3 / epyc7002
         run: |
           mkdir -p "$PWD/out"
+          chmod 0777 "$PWD/out"
           docker run --rm \
             -v "$PWD/tdas-live-test:/input" \
             -v "$PWD/out:/output" \
