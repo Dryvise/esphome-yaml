@@ -3,6 +3,7 @@
  *
  * LIVE TEST ONLY: temporarily present one TerraMaster TDAS USB-SCSI device
  * as a Synology SATA port while Synology's sd_probe() runs.
+ * Build trigger: DSM 7.3 / epyc7002.
  *
  * Target:
  *   USB path : 2-3.1.4
