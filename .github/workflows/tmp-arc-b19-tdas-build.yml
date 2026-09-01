@@ -1,0 +1,116 @@
+name: Build Arc b19 TDAS
+on:
+  push:
+    branches: [tmp-arc-b19-tdas-build]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build patched LKM for epyc7002 DSM 7.4
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT_PATH="$GITHUB_WORKSPACE"
+          VERSION=7.4
+          PLATFORM=epyc7002
+          git clone https://github.com/SynologyOpenSource/pkgscripts-ng.git "$ROOT_PATH/pkgscripts-ng"
+          cd "$ROOT_PATH/pkgscripts-ng"
+          git checkout DSM7.4
+          sudo ./EnvDeploy -q -v 7.4 -p epyc7002
+          mkdir -p "$ROOT_PATH/source"
+          ENV_PATH="$ROOT_PATH/build_env/ds.epyc7002-7.4"
+          sudo cp -al "$ROOT_PATH/pkgscripts-ng" "$ENV_PATH/pkgscripts-ng"
+          sudo chroot "$ENV_PATH" <<'EOF'
+          cd pkgscripts
+          sed -i 's/print(" ".join(kernels))/pass #&/' ProjectDepends.py
+          sed -i '/PLATFORM_FAMILY/a\	echo "PRODUCT=$PRODUCT" >> $file\n\techo "KSRC=$KERNEL_SEARCH_PATH" >> $file\n\techo "LINUX_SRC=$KERNEL_SEARCH_PATH" >> $file' include/build
+          ./SynoBuild -c -p epyc7002
+          while read -r line; do if [ "${line:0:1}" != "#" ]; then export ${line%%=*}="${line#*=}"; fi; done < /env${BUILD_ARCH}.mak
+          if [ -f "${KSRC}/Makefile" ]; then
+            KVERSION=$(grep '^VERSION ' "${KSRC}/Makefile" | awk '{print $3}')
+            PATCHLEVEL=$(grep '^PATCHLEVEL ' "${KSRC}/Makefile" | awk '{print $3}')
+            SUBLEVEL=$(grep '^SUBLEVEL ' "${KSRC}/Makefile" | awk '{print $3}')
+            echo "KVER=${KVERSION}.${PATCHLEVEL}.${SUBLEVEL}" >> /env${BUILD_ARCH}.mak
+          fi
+          EOF
+          echo 'ZGlmZiAtLWdpdCBhL3NoaW0vc3RvcmFnZS9zYXRhX3BvcnRfc2hpbS5jIGIvc2hpbS9zdG9yYWdlL3NhdGFfcG9ydF9zaGltLmMKaW5kZXggMzgzZmI0NC4uODEwZGVlOCAxMDA3NTUKLS0tIGEvc2hpbS9zdG9yYWdlL3NhdGFfcG9ydF9zaGltLmMKKysrIGIvc2hpbS9zdG9yYWdlL3NhdGFfcG9ydF9zaGltLmMKQEAgLTM4LDEyICszOCwxOCBAQAogI2luY2x1ZGUgPHNjc2kvc2NzaV9ob3N0Lmg+IC8vc3RydWN0IFNjc2lfSG9zdCwgU1lOT19QT1JUX1RZUEVfKgogI2luY2x1ZGUgPGxpbnV4L3BjaS5oPiAvL3N0cnVjdCBwY2lfZGV2LCB0b19wY2lfZGV2KCkKICNpbmNsdWRlIDxsaW51eC9jdHlwZS5oPiAvL2lzcHJpbnQoKQorI2luY2x1ZGUgPGxpbnV4L2RldmljZS5oPiAvL2Rldm1fa21lbWR1cCgpCisjaW5jbHVkZSA8bGludXgvc3RyaW5nLmg+CiAjaW5jbHVkZSAiLi4vLi4vY29uZmlnL3J1bnRpbWVfY29uZmlnLmgiCiAjaW5jbHVkZSAiLi4vLi4vY29uZmlnL3BsYXRmb3JtX3R5cGVzLmgiCiAKICNkZWZpbmUgU0hJTV9OQU1FICJTQVRBIHBvcnQgZW11bGF0b3IiCiAjZGVmaW5lIFZJUlRJT19IT1NUX0lEICJWaXJ0aW8gU0NTSSBIQkEiCiAKKy8qIFRlcnJhTWFzdGVyIEY4IGludGVybmFsIFREQVMgYnJpZGdlOiBwaHlzaWNhbCBVU0IgdG9wb2xvZ3kgcGF0aC4gKi8KKyNkZWZpbmUgVVNCX0lOVEVSTkFMX1BBVEggIjItMy4xLjQiCisjZGVmaW5lIFVTQl9JTlRFUk5BTF9BVEFfUE9SVCAwCisKIC8qIFNvbWUga2VybmVscy9wbGF0Zm9ybSBoZWFkZXJzIGRvIG5vdCBwcm92aWRlIHN0cnVjdCBzY3NpX2RldmljZTo6c3lub19ibG9ja19pbmZvLiAqLwogI2lmZGVmIEJMT0NLX0lORk9fU0laRQogI2RlZmluZSBSUF9IQVNfU1lOT19CTE9DS19JTkZPIDEKQEAgLTExNSw2ICsxMjEsNjcgQEAgc3RhdGljIGJvb2wgaG9zdF9wY2lfcGFyZW50X2lzX3N0b3JhZ2UoY29uc3Qgc3RydWN0IFNjc2lfSG9zdCAqaG9zdCkKICAgICByZXR1cm4gZmFsc2U7CiB9CiAKKy8qCisgKiBNYXRjaCBvbmx5IHRoZSBTQ1NJIGhvc3QgYmVsb3cgdGhlIHBoeXNpY2FsIFRlcnJhTWFzdGVyIFREQVMgVVNCIHBhdGguCisgKiBkZXZfbmFtZSgpIG9uIHRoZSBwYXJlbnQgY2hhaW4gY29udGFpbnMgYm90aCAiMi0zLjEuNCIgYW5kCisgKiAiMi0zLjEuNDoxLjAiICh0aGUgVUFTIGludGVyZmFjZSkuCisgKi8KK3N0YXRpYyBib29sIGlzX3VzYl9pbnRlcm5hbF90YXJnZXQoY29uc3Qgc3RydWN0IHNjc2lfZGV2aWNlICpzZHApCit7CisgICAgc3RydWN0IGRldmljZSAqZGV2OworICAgIGNvbnN0IHNpemVfdCBwYXRoX2xlbiA9IHN0cmxlbihVU0JfSU5URVJOQUxfUEFUSCk7CisKKyAgICBpZiAodW5saWtlbHkoIXNkcCB8fCAhc2RwLT5ob3N0KSkKKyAgICAgICAgcmV0dXJuIGZhbHNlOworCisgICAgZGV2ID0gc2RwLT5ob3N0LT5zaG9zdF9nZW5kZXYucGFyZW50OworICAgIHdoaWxlIChkZXYpIHsKKyAgICAgICAgY29uc3QgY2hhciAqbmFtZSA9IGRldl9uYW1lKGRldik7CisKKyAgICAgICAgaWYgKG5hbWUgJiYKKyAgICAgICAgICAgICghc3RyY21wKG5hbWUsIFVTQl9JTlRFUk5BTF9QQVRIKSB8fAorICAgICAgICAgICAgICghc3RybmNtcChuYW1lLCBVU0JfSU5URVJOQUxfUEFUSCwgcGF0aF9sZW4pICYmIG5hbWVbcGF0aF9sZW5dID09ICc6JykpKQorICAgICAgICAgICAgcmV0dXJuIHRydWU7CisKKyAgICAgICAgZGV2ID0gZGV2LT5wYXJlbnQ7CisgICAgfQorCisgICAgcmV0dXJuIGZhbHNlOworfQorCisvKgorICogTmV2ZXIgbW9kaWZ5IHRoZSBnbG9iYWwgVUFTL3VzYi1zdG9yYWdlIGhvc3QgdGVtcGxhdGUuICBDbG9uZSBpdCBmb3IgdGhlCisgKiB0YXJnZXQgU2NzaV9Ib3N0IG9ubHksIHNvIHRoZSBBcmMgYm9vdCBVU0IgKDEtMy9ob3N0MCkgYW5kIGFsbCBvdGhlciBVU0IKKyAqIHN0b3JhZ2Uga2VlcCB0aGVpciBvcmlnaW5hbCBTeW5vbG9neSBwb3J0IHR5cGUuCisgKi8KK3N0YXRpYyBpbnQgcHJlcGFyZV91c2JfaW50ZXJuYWxfaG9zdChzdHJ1Y3Qgc2NzaV9kZXZpY2UgKnNkcCkKK3sKKyAgICBzdHJ1Y3Qgc2NzaV9ob3N0X3RlbXBsYXRlICpwcml2YXRlX2hvc3R0OworCisgICAgaWYgKCFpc191c2JfaW50ZXJuYWxfdGFyZ2V0KHNkcCkpCisgICAgICAgIHJldHVybiAwOworCisgICAgaWYgKHNkcC0+aG9zdC0+aG9zdHQtPnN5bm9fcG9ydF90eXBlID09IFNZTk9fUE9SVF9UWVBFX1NBVEEpCisgICAgICAgIHJldHVybiAwOworCisgICAgcHJpdmF0ZV9ob3N0dCA9IGRldm1fa21lbWR1cCgmc2RwLT5ob3N0LT5zaG9zdF9nZW5kZXYsCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzZHAtPmhvc3QtPmhvc3R0LAorICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2l6ZW9mKCpwcml2YXRlX2hvc3R0KSwKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIEdGUF9LRVJORUwpOworICAgIGlmICh1bmxpa2VseSghcHJpdmF0ZV9ob3N0dCkpIHsKKyAgICAgICAgcHJfbG9jX2VycigiVVNCIGludGVybmFsOiBmYWlsZWQgdG8gY2xvbmUgU0NTSSBob3N0IHRlbXBsYXRlIGZvciBwYXRoICVzIiwKKyAgICAgICAgICAgICAgICAgICBVU0JfSU5URVJOQUxfUEFUSCk7CisgICAgICAgIHJldHVybiAtRU5PTUVNOworICAgIH0KKworICAgIHByaXZhdGVfaG9zdHQtPnN5bm9fcG9ydF90eXBlID0gU1lOT19QT1JUX1RZUEVfU0FUQTsKKyAgICBzZHAtPmhvc3QtPmhvc3R0ID0gcHJpdmF0ZV9ob3N0dDsKKworICAgIHByX2xvY19pbmYoIlVTQiBpbnRlcm5hbDogaG9zdCVkIHBhdGg9JXMgY2xvbmVkIGFuZCBjaGFuZ2VkIHRvIFNBVEEgcG9ydCB0eXBlIiwKKyAgICAgICAgICAgICAgIHNkcC0+aG9zdC0+aG9zdF9ubywgVVNCX0lOVEVSTkFMX1BBVEgpOworICAgIHJldHVybiAwOworfQorCiAjaWYgUlBfSEFTX1NZTk9fQkxPQ0tfSU5GTwogc3RhdGljIGNvbnN0IGNoYXIgKnJlc29sdmVfc3lub19wY2llcGF0aChzdHJ1Y3QgZGV2aWNlICpwY2lfZGV2LCBjaGFyICpvdXRfYnVmLCBzaXplX3Qgb3V0X2xlbikKIHsKQEAgLTIwMyw2ICsyNzAsNyBAQCBzdGF0aWMgdm9pZCBwb3B1bGF0ZV9zeW5vX2Jsb2NrX2luZm9faWZfbmVlZGVkKHN0cnVjdCBzY3NpX2RldmljZSAqc2RwKQogICAgIGNvbnN0IGNoYXIgKnBjaWVwYXRoOwogICAgIHVuc2lnbmVkIGludCBhdGFfcG9ydF9ubzsKICAgICBjaGFyIGR0c19wY2llcGF0aFsxMjhdOworICAgIGNvbnN0IGJvb2wgdXNiX2ludGVybmFsID0gaXNfdXNiX2ludGVybmFsX3RhcmdldChzZHApOwogCiAgICAgaWYgKCFjdXJyZW50X2NvbmZpZy5od19jb25maWcgfHwgIWN1cnJlbnRfY29uZmlnLmh3X2NvbmZpZy0+aXNfZHQpCiAgICAgICAgIHJldHVybjsKQEAgLTIxMCw3ICsyNzgsOCBAQCBzdGF0aWMgdm9pZCBwb3B1bGF0ZV9zeW5vX2Jsb2NrX2luZm9faWZfbmVlZGVkKHN0cnVjdCBzY3NpX2RldmljZSAqc2RwKQogICAgIC8qIE9ubHkgbm9uLWxpYmF0YSBEVCBkaXNrcyBvbiBQQ0kgc3RvcmFnZSBjb250cm9sbGVycyBuZWVkIHRoaXMuCiAgICAgICogaG9zdF9wY2lfcGFyZW50X2lzX3N0b3JhZ2UoKSAoY2xhc3MgMHgwMSkgZXhjbHVkZXMgVVNCIGhvc3QgY29udHJvbGxlcnMgKGNsYXNzIDB4MEMpCiAgICAgICogd2hpY2ggd291bGQgb3RoZXJ3aXNlIGFsc28gcGFzcyBob3N0X2hhc19wY2lfcGFyZW50KCkgYW5kIGdldCBhIGZha2UgYWhjaSBzeW5vX2Jsb2NrX2luZm8uICovCi0gICAgaWYgKGhvc3RfdXNlc19saWJhdGEoc2RwLT5ob3N0KSB8fCAhaG9zdF9wY2lfcGFyZW50X2lzX3N0b3JhZ2Uoc2RwLT5ob3N0KSkKKyAgICBpZiAoaG9zdF91c2VzX2xpYmF0YShzZHAtPmhvc3QpIHx8CisgICAgICAgICghdXNiX2ludGVybmFsICYmICFob3N0X3BjaV9wYXJlbnRfaXNfc3RvcmFnZShzZHAtPmhvc3QpKSkKICAgICAgICAgcmV0dXJuOwogCiAgICAgLyoKQEAgLTIxOSw3ICsyODgsNyBAQCBzdGF0aWMgdm9pZCBwb3B1bGF0ZV9zeW5vX2Jsb2NrX2luZm9faWZfbmVlZGVkKHN0cnVjdCBzY3NpX2RldmljZSAqc2RwKQogICAgICAqIGhvc3RfdXNlc19saWJhdGEgYWxsb3dsaXN0IHdvdWxkIGhhdmUgdGhlaXIgZHJpdmVyLXNldCBzeW5vX2Jsb2NrX2luZm8gcmVwbGFjZWQgd2l0aAogICAgICAqIG91ciBhcHByb3hpbWF0ZSB2YWx1ZXMsIGNhdXNpbmcgd3Jvbmcgc2xvdCBhc3NpZ25tZW50cyBhbmQgaW52aXNpYmxlIGRpc2tzIGluIFNNLgogICAgICAqLwotICAgIGlmIChzZHAtPnN5bm9fYmxvY2tfaW5mb1swXSAhPSAnXDAnKQorICAgIGlmICghdXNiX2ludGVybmFsICYmIHNkcC0+c3lub19ibG9ja19pbmZvWzBdICE9ICdcMCcpCiAgICAgICAgIHJldHVybjsKIAogICAgIC8qIFdhbGsgdXAgdGhlIGRldmljZS1wYXJlbnQgY2hhaW4gdW50aWwgd2UgbGFuZCBvbiBhIFBDSSBkZXZpY2UgKi8KQEAgLTI1MiwxMiArMzIxLDIyIEBAIHN0YXRpYyB2b2lkIHBvcHVsYXRlX3N5bm9fYmxvY2tfaW5mb19pZl9uZWVkZWQoc3RydWN0IHNjc2lfZGV2aWNlICpzZHApCiAgICAgICogUHJlZmVyIGV4cGxpY2l0IEhCQSBwb3J0IGluZGV4IGZyb20gdG9wb2xvZ3kgbm9kZSBuYW1lIChwb3J0LUg6UCkuCiAgICAgICogRmFsbCBiYWNrIHRvIFNDU0kgdGFyZ2V0IElEIGlmIHRvcG9sb2d5IGRvZXMgbm90IGV4cG9zZSBhIHBvcnQgbm9kZS4KICAgICAgKi8KLSAgICBhdGFfcG9ydF9ubyA9IHNkcC0+aWQ7Ci0gICAgaWYgKCFyZXNvbHZlX2hiYV9wb3J0X25vKHNkcCwgJmF0YV9wb3J0X25vKSkKLSAgICAgICAgcHJfbG9jX2RiZygiTm8gcG9ydC1IOlAgbm9kZSBmb3IgL2Rldi8lczsgZmFsbGluZyBiYWNrIHRvIHNkcC0+aWQ9JXUiLAotICAgICAgICAgICAgICAgICAgIHNkcC0+c3lub19kaXNrX25hbWUsIHNkcC0+aWQpOwotCi0gICAgcGNpZXBhdGggPSByZXNvbHZlX3N5bm9fcGNpZXBhdGgoZGV2LCBkdHNfcGNpZXBhdGgsIHNpemVvZihkdHNfcGNpZXBhdGgpKTsKKyAgICBpZiAodXNiX2ludGVybmFsKSB7CisgICAgICAgIC8qCisgICAgICAgICAqIFVzZSB0aGUgeEhDSSBQQ0kgQkRGIGFzIGEgc3RhYmxlIHN5bnRoZXRpYyBjb250cm9sbGVyLiAgVGhlIEFyYyBEVAorICAgICAgICAgKiBkaXNrcyBhZGRvbiBjb25zdW1lcyBwY2llcGF0aC9hdGFfcG9ydF9uby9kcml2ZXIgZm9yIHNsb3QgbWFwcGluZzsKKyAgICAgICAgICogdGhpcyBkb2VzIG5vdCByZXF1aXJlIHRoZSBwaHlzaWNhbCBjb250cm9sbGVyIHRvIGJlIEFIQ0kuCisgICAgICAgICAqLworICAgICAgICBhdGFfcG9ydF9ubyA9IFVTQl9JTlRFUk5BTF9BVEFfUE9SVDsKKyAgICAgICAgcGNpZXBhdGggPSBkZXZfbmFtZShkZXYpOworICAgIH0gZWxzZSB7CisgICAgICAgIGF0YV9wb3J0X25vID0gc2RwLT5pZDsKKyAgICAgICAgaWYgKCFyZXNvbHZlX2hiYV9wb3J0X25vKHNkcCwgJmF0YV9wb3J0X25vKSkKKyAgICAgICAgICAgIHByX2xvY19kYmcoIk5vIHBvcnQtSDpQIG5vZGUgZm9yIC9kZXYvJXM7IGZhbGxpbmcgYmFjayB0byBzZHAtPmlkPSV1IiwKKyAgICAgICAgICAgICAgICAgICAgICAgc2RwLT5zeW5vX2Rpc2tfbmFtZSwgc2RwLT5pZCk7CisKKyAgICAgICAgcGNpZXBhdGggPSByZXNvbHZlX3N5bm9fcGNpZXBhdGgoZGV2LCBkdHNfcGNpZXBhdGgsIHNpemVvZihkdHNfcGNpZXBhdGgpKTsKKyAgICB9CiAKICAgICAvKgogICAgICAqIFByZWZlciBTeW5vbG9neSBEVFMgcGNpZXBhdGggZm9ybWF0IHdoZW4gaGVscGVyIHN5bWJvbCBpcyBhdmFpbGFibGUuCkBAIC0yOTUsNiArMzc0LDkgQEAgc3RhdGljIGJvb2wgaXNfZml4YWJsZShzdHJ1Y3Qgc2NzaV9kZXZpY2UgKnNkcCkKICAgICBpZiAodW5saWtlbHkoIXNkcCB8fCAhc2RwLT5ob3N0IHx8ICFzZHAtPmhvc3QtPmhvc3R0KSkKICAgICAgICAgcmV0dXJuIGZhbHNlOwogCisgICAgaWYgKGlzX3VzYl9pbnRlcm5hbF90YXJnZXQoc2RwKSkKKyAgICAgICAgcmV0dXJuIHRydWU7CisKICAgICBjb25zdCBjaGFyICpob3N0X25hbWUgPSBzZHAtPmhvc3QtPmhvc3R0LT5uYW1lOwogICAgIGNvbnN0IGJvb2wgdXNlc19saWJhdGEgPSBob3N0X3VzZXNfbGliYXRhKHNkcC0+aG9zdCk7CiAgICAgY29uc3QgYm9vbCBub25fc2F0YV9wb3J0ID0gc2RwLT5ob3N0LT5ob3N0dC0+c3lub19wb3J0X3R5cGUgIT0gU1lOT19QT1JUX1RZUEVfU0FUQTsKQEAgLTMzMyw5ICs0MTUsMTcgQEAgc3RhdGljIGJvb2wgaXNfZml4YWJsZShzdHJ1Y3Qgc2NzaV9kZXZpY2UgKnNkcCkKICAqLwogc3RhdGljIGludCBvbl9uZXdfc2NzaV9kaXNrX2RldmljZShzdHJ1Y3Qgc2NzaV9kZXZpY2UgKnNkcCkKIHsKKyAgICBpbnQgb3V0OworCiAgICAgaWYgKCFpc19maXhhYmxlKHNkcCkpCiAgICAgICAgIHJldHVybiAwOwogCisgICAgaWYgKGlzX3VzYl9pbnRlcm5hbF90YXJnZXQoc2RwKSkgeworICAgICAgICBvdXQgPSBwcmVwYXJlX3VzYl9pbnRlcm5hbF9ob3N0KHNkcCk7CisgICAgICAgIGlmICh1bmxpa2VseShvdXQgIT0gMCkpCisgICAgICAgICAgICByZXR1cm4gb3V0OworICAgIH0KKwogICAgIC8vIERULW1vZGUgUENJLXN0b3JhZ2UgSEJBIGRpc2tzIChpc19wY2lfc3RvcmFnZV9zY3NpKSBhcmUgZml4ZWQgaGVyZSB0b28sIHNhbWUgYXMgU0FTL1ZpcnRJTy4KICAgICAvLyBUaGlzIG1lYW5zIHRoZWlyIHN5bm9fcG9ydF90eXBlIGlzIFNBVEEgYmVmb3JlIHNkX3Byb2JlKCkgcnVucywgc28gc2QuYyBhc3NpZ25zIHRoZW0gc2F0YU4KICAgICAvLyBuYW1pbmcvc2xvdCBtYXBwaW5nIHVuaWZvcm1seSB3aXRoIG5hdGl2ZSBTQVRBIGRpc2tzIGluc3RlYWQgb2YgZmFsbGluZyBiYWNrIHRvIHNkWC9zYXNOLgpAQCAtMzYzLDkgKzQ1MywxNyBAQCBzdGF0aWMgaW50IG9uX25ld19zY3NpX2Rpc2tfZGV2aWNlKHN0cnVjdCBzY3NpX2RldmljZSAqc2RwKQogICovCiBzdGF0aWMgaW50IG9uX2V4aXN0aW5nX3Njc2lfZGlza19kZXZpY2Uoc3RydWN0IHNjc2lfZGV2aWNlICpzZHApCiB7CisgICAgaW50IG91dDsKKwogICAgIGlmICghaXNfZml4YWJsZShzZHApKQogICAgICAgICByZXR1cm4gMDsKIAorICAgIGlmIChpc191c2JfaW50ZXJuYWxfdGFyZ2V0KHNkcCkpIHsKKyAgICAgICAgb3V0ID0gcHJlcGFyZV91c2JfaW50ZXJuYWxfaG9zdChzZHApOworICAgICAgICBpZiAodW5saWtlbHkob3V0ICE9IDApKQorICAgICAgICAgICAgcmV0dXJuIG91dDsKKyAgICB9CisKICAgICBwcl9sb2NfZGJnKAogICAgICAgICAgICAgIkZvdW5kIGluaXRpYWxpemVkIGRpc2sgdmVuZG9yPVwiJXNcIiBtb2RlbD1cIiVzXCIgY29ubmVjdGVkIHRvIFwiJXNcIiBIQkEgb3ZlciBub24tU0FUQSBwb3J0ICh0eXBlPSVkKS4iCiAgICAgICAgICAgICAiIEl0IG11c3QgYmUgYXV0by1yZXBsdWdnZWQgdG8gZml4IGl0LiIsIHNkcC0+dmVuZG9yLCBzZHAtPm1vZGVsLCBzZHAtPmhvc3QtPmhvc3R0LT5uYW1lLAo=' | base64 -d > "$ROOT_PATH/tdas.patch"
+          sudo chroot "$ENV_PATH" /bin/bash -lc '
+            set -eux
+            sed -i "s/^CFLAGS=/#CFLAGS=/g; s/^CXXFLAGS=/#CXXFLAGS=/g" /env${BUILD_ARCH}.mak
+            while read -r line; do if [ "${line:0:1}" != "#" ]; then export ${line%%=*}="${line#*=}"; fi; done < /env${BUILD_ARCH}.mak
+            mkdir -p /source/output
+            git clone https://github.com/AuxXxilium/arc-lkm.git /source/input
+            cd /source/input
+            git checkout 4445f57494888fa12e4db4b7c02a790072bd7259 || true
+          '
+          sudo cp "$ROOT_PATH/tdas.patch" "$ENV_PATH/tmp/tdas.patch"
+          sudo chroot "$ENV_PATH" /bin/bash -lc '
+            set -eux
+            sed -i "s/^CFLAGS=/#CFLAGS=/g; s/^CXXFLAGS=/#CXXFLAGS=/g" /env${BUILD_ARCH}.mak
+            while read -r line; do if [ "${line:0:1}" != "#" ]; then export ${line%%=*}="${line#*=}"; fi; done < /env${BUILD_ARCH}.mak
+            cd /source/input
+            git reset --hard
+            git checkout 4445f57494888fa12e4db4b7c02a790072bd7259
+            git apply /tmp/tdas.patch
+            [ -z "$(grep env.mak Makefile || true)" ] && sed -i "1 i include /env.mak" Makefile
+            PLATFORM=epyc7002 make -j$(nproc) CC="${CC}" prod-v7
+            strip -g redpill.ko
+            modinfo redpill.ko
+            RPKOVER=$(modinfo --field=vermagic redpill.ko | awk "{print \$1}")
+            gzip -9 redpill.ko
+            mv redpill.ko.gz "/source/output/rp-epyc7002-7.4-${RPKOVER/+/-}prod.ko.gz"
+          '
+          sudo cp -a "$ENV_PATH/source/output/." "$ROOT_PATH/"
+          ls -lh "$ROOT_PATH"/*.ko.gz
+
+      - name: Normalize LKM filename
+        run: |
+          set -eux
+          f=$(ls rp-epyc7002-7.4-*.ko.gz | head -1)
+          mv "$f" rp-epyc7002-7.4-5.10.55-prod.ko.gz
+          gzip -dc rp-epyc7002-7.4-5.10.55-prod.ko.gz > redpill-epyc7002-7.4-5.10.55-tdas-prod.ko
+          modinfo redpill-epyc7002-7.4-5.10.55-tdas-prod.ko
+          sha256sum rp-epyc7002-7.4-5.10.55-prod.ko.gz redpill-epyc7002-7.4-5.10.55-tdas-prod.ko > SHA256SUMS.txt
+
+      - name: Download Arc b19 image
+        run: |
+          set -eux
+          wget -O arc-b19.zip https://github.com/AuxXxilium/arc-beta/releases/download/4.0.0b19/arc-4.0.0b19.img.zip
+          echo 'f4dc47e5cecf073f77727e4d3c0a05b92a09977037baede74ac5ffc8c856e1f0  arc-b19.zip' | sha256sum -c -
+          unzip arc-b19.zip
+          IMG=$(find . -maxdepth 1 -type f -name '*.img' | head -1)
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      - name: Inject patched LKM into Arc image
+        run: |
+          set -euxo pipefail
+          LOOP=$(sudo losetup --show -Pf "$IMG")
+          echo "LOOP=$LOOP"
+          lsblk "$LOOP"
+          mkdir -p mntp3
+          sudo mount "${LOOP}p3" mntp3
+          sudo find mntp3 -maxdepth 3 -type f -name 'rp-epyc7002-7.4-5.10.55-prod.ko.gz' -print
+          TARGET=$(sudo find mntp3 -type f -path '*/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz' | head -1)
+          test -n "$TARGET"
+          sudo cp rp-epyc7002-7.4-5.10.55-prod.ko.gz "$TARGET"
+          sync
+          sudo umount mntp3
+          sudo losetup -d "$LOOP"
+          mv "$IMG" arc-4.0.0b19-epyc7002-DSM74-TDAS.img
+          sha256sum arc-4.0.0b19-epyc7002-DSM74-TDAS.img >> SHA256SUMS.txt
+          zip -1 arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip arc-4.0.0b19-epyc7002-DSM74-TDAS.img SHA256SUMS.txt
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-b19-epyc7002-dsm74-tdas
+          compression-level: 0
+          path: |
+            arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip
+            rp-epyc7002-7.4-5.10.55-prod.ko.gz
+            redpill-epyc7002-7.4-5.10.55-tdas-prod.ko
+            SHA256SUMS.txt
