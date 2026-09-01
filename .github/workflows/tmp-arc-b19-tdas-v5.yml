@@ -1,0 +1,79 @@
+name: Build Arc b19 TDAS v5
+on:
+  push:
+    branches: [tmp-arc-b19-tdas-v5]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build patched LKM
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          git clone https://github.com/AuxXxilium/arc-lkm.git "$ROOT/arc-lkm"
+          cd "$ROOT/arc-lkm"
+          git checkout 4445f57494888fa12e4db4b7c02a790072bd7259
+          wget -qO- https://raw.githubusercontent.com/Dryvise/esphome-yaml/tmp-arc-b19-tdas-build/.github/workflows/tmp-arc-b19-tdas-build.yml > "$ROOT/old.yml"
+          B64=$(grep "base64 -d >.*tdas.patch" "$ROOT/old.yml" | sed -E "s/.*echo '([^']+)'.*/\1/")
+          test -n "$B64"
+          echo "$B64" | base64 -d > "$ROOT/tdas.patch"
+          git apply "$ROOT/tdas.patch"
+          mkdir -p "$ROOT/out"
+          chmod 777 "$ROOT/out"
+          docker pull auxxxilium/syno-compiler:7.4
+          docker run --privileged --rm -t \
+            -v "$ROOT/arc-lkm:/input" \
+            -v "$ROOT/out:/output" \
+            auxxxilium/syno-compiler:7.4 \
+            compile-lkm epyc7002 prod
+          test -f "$ROOT/out/redpill.ko"
+          modinfo "$ROOT/out/redpill.ko"
+          test "$(modinfo -F vermagic "$ROOT/out/redpill.ko" | awk '{print $1}')" = "5.10.55+"
+          sudo chown "$(id -u):$(id -g)" "$ROOT/out/redpill.ko"
+          strip -g "$ROOT/out/redpill.ko"
+          gzip -9 -c "$ROOT/out/redpill.ko" > "$ROOT/rp-epyc7002-7.4-5.10.55-prod.ko.gz"
+          cp "$ROOT/out/redpill.ko" "$ROOT/redpill-epyc7002-7.4-5.10.55-tdas-prod.ko"
+          cd "$ROOT"
+          sha256sum rp-epyc7002-7.4-5.10.55-prod.ko.gz redpill-epyc7002-7.4-5.10.55-tdas-prod.ko > SHA256SUMS.txt
+      - name: Download Arc b19
+        run: |
+          set -euxo pipefail
+          wget -O arc-b19.zip https://github.com/AuxXxilium/arc-beta/releases/download/4.0.0b19/arc-4.0.0b19.img.zip
+          echo 'f4dc47e5cecf073f77727e4d3c0a05b92a09977037baede74ac5ffc8c856e1f0  arc-b19.zip' | sha256sum -c -
+          unzip arc-b19.zip
+          IMG=$(find . -maxdepth 1 -type f -name '*.img' | head -1)
+          test -n "$IMG"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+      - name: Inject LKM
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOOP=$(sudo losetup --show -Pf "$IMG")
+          trap 'sudo umount mntp3 2>/dev/null || true; sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+          lsblk "$LOOP"
+          mkdir -p mntp3
+          sudo mount "${LOOP}p3" mntp3
+          TARGET=$(sudo find mntp3 -type f -path '*/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz' | head -1)
+          echo "TARGET=$TARGET"
+          if [ -z "$TARGET" ]; then sudo find mntp3 -maxdepth 4 -type f | grep -E 'lkms|epyc7002' | head -200 || true; exit 1; fi
+          sudo cp rp-epyc7002-7.4-5.10.55-prod.ko.gz "$TARGET"
+          sudo gzip -t "$TARGET"
+          sync
+          sudo umount mntp3
+          sudo losetup -d "$LOOP"
+          trap - EXIT
+          mv "$IMG" arc-4.0.0b19-epyc7002-DSM74-TDAS.img
+          sha256sum arc-4.0.0b19-epyc7002-DSM74-TDAS.img >> SHA256SUMS.txt
+          zip -1 arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip arc-4.0.0b19-epyc7002-DSM74-TDAS.img SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arc-b19-epyc7002-dsm74-tdas-v5
+          compression-level: 0
+          path: |
+            arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip
+            rp-epyc7002-7.4-5.10.55-prod.ko.gz
+            redpill-epyc7002-7.4-5.10.55-tdas-prod.ko
+            SHA256SUMS.txt
