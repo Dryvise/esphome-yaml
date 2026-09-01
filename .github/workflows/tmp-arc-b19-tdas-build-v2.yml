@@ -1,0 +1,109 @@
+name: Build Arc b19 TDAS v2
+on:
+  push:
+    branches: [tmp-arc-b19-tdas-build]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build patched LKM 7.4 epyc7002
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          git clone https://github.com/SynologyOpenSource/pkgscripts-ng.git "$ROOT/pkgscripts-ng"
+          cd "$ROOT/pkgscripts-ng"
+          git checkout DSM7.4
+          sudo ./EnvDeploy -q -v 7.4 -p epyc7002
+          ENV="$ROOT/build_env/ds.epyc7002-7.4"
+          sudo cp -al "$ROOT/pkgscripts-ng" "$ENV/pkgscripts-ng"
+          sudo chroot "$ENV" /bin/bash -lc '
+            set -e
+            cd /pkgscripts-ng
+            sed -i "s/print(\" \".join(kernels))/pass #&/" ProjectDepends.py
+            sed -i "/PLATFORM_FAMILY/a\\\techo \"PRODUCT=\$PRODUCT\" >> \$file\\n\\techo \"KSRC=\$KERNEL_SEARCH_PATH\" >> \$file\\n\\techo \"LINUX_SRC=\$KERNEL_SEARCH_PATH\" >> \$file" include/build
+            ./SynoBuild -c -p epyc7002
+            ENVFILE=/env64.mak; [ -f "$ENVFILE" ] || ENVFILE=/env32.mak
+            while read -r line; do [ "${line:0:1}" = "#" ] || export ${line%%=*}="${line#*=}"; done < "$ENVFILE"
+            if [ -f "$KSRC/Makefile" ]; then
+              V=$(grep "^VERSION " "$KSRC/Makefile" | awk "{print \\$3}")
+              P=$(grep "^PATCHLEVEL " "$KSRC/Makefile" | awk "{print \\$3}")
+              S=$(grep "^SUBLEVEL " "$KSRC/Makefile" | awk "{print \\$3}")
+              echo "KVER=$V.$P.$S" >> "$ENVFILE"
+            fi
+            cp "$ENVFILE" /env.mak
+          '
+          B64=$(grep "base64 -d >.*tdas.patch" "$ROOT/.github/workflows/tmp-arc-b19-tdas-build.yml" | sed -E "s/.*echo '([^']+)'.*/\1/")
+          test -n "$B64"
+          echo "$B64" | base64 -d > "$ROOT/tdas.patch"
+          sudo cp "$ROOT/tdas.patch" "$ENV/tmp/tdas.patch"
+          sudo chroot "$ENV" /bin/bash -lc '
+            set -eux
+            ENVFILE=/env64.mak; [ -f "$ENVFILE" ] || ENVFILE=/env32.mak
+            sed -i "s/^CFLAGS=/#CFLAGS=/g; s/^CXXFLAGS=/#CXXFLAGS=/g" "$ENVFILE"
+            cp "$ENVFILE" /env.mak
+            while read -r line; do [ "${line:0:1}" = "#" ] || export ${line%%=*}="${line#*=}"; done < "$ENVFILE"
+            rm -rf /source/input /source/output
+            mkdir -p /source/output
+            git clone https://github.com/AuxXxilium/arc-lkm.git /source/input
+            cd /source/input
+            git checkout 4445f57494888fa12e4db4b7c02a790072bd7259
+            git apply /tmp/tdas.patch
+            [ -n "$(grep env.mak Makefile || true)" ] || sed -i "1 i include /env.mak" Makefile
+            PLATFORM=epyc7002 make -j$(nproc) CC="$CC" prod-v7
+            strip -g redpill.ko
+            modinfo redpill.ko
+            test "$(modinfo -F vermagic redpill.ko | awk "{print \\$1}")" = "5.10.55+"
+            gzip -9 redpill.ko
+            mv redpill.ko.gz /source/output/rp-epyc7002-7.4-5.10.55-prod.ko.gz
+          '
+          sudo cp "$ENV/source/output/rp-epyc7002-7.4-5.10.55-prod.ko.gz" "$ROOT/"
+          gzip -dc "$ROOT/rp-epyc7002-7.4-5.10.55-prod.ko.gz" > "$ROOT/redpill-epyc7002-7.4-5.10.55-tdas-prod.ko"
+          modinfo "$ROOT/redpill-epyc7002-7.4-5.10.55-tdas-prod.ko"
+          cd "$ROOT"
+          sha256sum rp-epyc7002-7.4-5.10.55-prod.ko.gz redpill-epyc7002-7.4-5.10.55-tdas-prod.ko > SHA256SUMS.txt
+
+      - name: Download and verify Arc b19
+        run: |
+          set -eux
+          wget -O arc-b19.zip https://github.com/AuxXxilium/arc-beta/releases/download/4.0.0b19/arc-4.0.0b19.img.zip
+          echo 'f4dc47e5cecf073f77727e4d3c0a05b92a09977037baede74ac5ffc8c856e1f0  arc-b19.zip' | sha256sum -c -
+          unzip arc-b19.zip
+          IMG=$(find . -maxdepth 1 -type f -name '*.img' | head -1)
+          test -n "$IMG"
+          echo "IMG=$IMG" >> "$GITHUB_ENV"
+
+      - name: Inject LKM into partition 3
+        shell: bash
+        run: |
+          set -euxo pipefail
+          LOOP=$(sudo losetup --show -Pf "$IMG")
+          trap 'sudo umount mntp3 2>/dev/null || true; sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+          lsblk "$LOOP"
+          mkdir -p mntp3
+          sudo mount "${LOOP}p3" mntp3
+          TARGET=$(sudo find mntp3 -type f -path '*/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz' | head -1)
+          echo "TARGET=$TARGET"
+          test -n "$TARGET"
+          sudo cp rp-epyc7002-7.4-5.10.55-prod.ko.gz "$TARGET"
+          sudo gzip -t "$TARGET"
+          sync
+          sudo umount mntp3
+          sudo losetup -d "$LOOP"
+          trap - EXIT
+          mv "$IMG" arc-4.0.0b19-epyc7002-DSM74-TDAS.img
+          sha256sum arc-4.0.0b19-epyc7002-DSM74-TDAS.img >> SHA256SUMS.txt
+          zip -1 arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip arc-4.0.0b19-epyc7002-DSM74-TDAS.img SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arc-b19-epyc7002-dsm74-tdas
+          compression-level: 0
+          path: |
+            arc-4.0.0b19-epyc7002-DSM74-TDAS.img.zip
+            rp-epyc7002-7.4-5.10.55-prod.ko.gz
+            redpill-epyc7002-7.4-5.10.55-tdas-prod.ko
+            SHA256SUMS.txt
