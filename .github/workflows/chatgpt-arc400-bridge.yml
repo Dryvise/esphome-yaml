@@ -1,4 +1,4 @@
-name: ChatGPT Arc target check
+name: Build Arc 4.0.0 TDAS images
 
 on:
   push:
@@ -6,27 +6,208 @@ on:
       - chatgpt/arc400-build
 
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Arc 4.0.0 source
+      - name: Checkout temporary build files
         uses: actions/checkout@v4
         with:
-          repository: AuxXxilium/arc
-          ref: f46e1f95fa147486516f97a804ad633829a45a98
+          ref: chatgpt/arc400-build
 
-      - name: Install Python requirements
+      - name: Build patched Arc LKM for both platforms
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --user -r scripts/requirements.txt
+          git clone https://github.com/AuxXxilium/arc-lkm.git /tmp/arc-lkm
+          cd /tmp/arc-lkm
+          git checkout 4445f57494888fa12e4db4b7c02a790072bd7259
+          git apply --check "$GITHUB_WORKSPACE/chatgpt-arc400/arc-tdas-usb-internal-final.patch"
+          git apply "$GITHUB_WORKSPACE/chatgpt-arc400/arc-tdas-usb-internal-final.patch"
+          ./build-lkm.sh -v 7.4 -p epyc7002,geminilakenk
 
-      - name: Check exact DSM target for both models
+          for f in \
+            releases/rp-epyc7002-7.4-5.10.55-dev.ko.gz \
+            releases/rp-epyc7002-7.4-5.10.55-prod.ko.gz \
+            releases/rp-geminilakenk-7.4-5.10.55-dev.ko.gz \
+            releases/rp-geminilakenk-7.4-5.10.55-prod.ko.gz; do
+            test -s "$f"
+            gzip -t "$f"
+            gzip -dc "$f" | strings | grep -F '2-3.1.4' >/dev/null
+            gzip -dc "$f" | strings | grep -F 'USB internal' >/dev/null
+          done
+          sha256sum releases/rp-{epyc7002,geminilakenk}-7.4-5.10.55-{dev,prod}.ko.gz
+
+      - name: Download and verify official Arc 4.0.0 base
         shell: bash
         run: |
           set -euo pipefail
-          echo '===== SA6400 / 7.4.1-90080-0 ====='
-          python3 scripts/functions.py getpats4mv -m 'SA6400' -v '7.4.1-90080-0'
-          echo
-          echo '===== DS425+ / 7.4.1-90080-0 ====='
-          python3 scripts/functions.py getpats4mv -m 'DS425+' -v '7.4.1-90080-0'
+          mkdir -p /tmp/base /tmp/out
+          curl -fL --retry 5 --retry-all-errors \
+            https://github.com/AuxXxilium/arc/releases/download/4.0.0/arc-4.0.0.img.zip \
+            -o /tmp/base/arc-4.0.0.img.zip
+          echo 'd6310a975e41eb3520f36efb66b8dbb4f0c2298705e04421d722b4e56984dcae  /tmp/base/arc-4.0.0.img.zip' | sha256sum -c -
+          unzip -q /tmp/base/arc-4.0.0.img.zip -d /tmp/base
+          test -s /tmp/base/arc.img
+          echo '===== OFFICIAL BASE ====='
+          fdisk -l /tmp/base/arc.img
+
+      - name: Download DSM 7.4.1-90080 prepared files
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-all-errors \
+            'https://raw.githubusercontent.com/AuxXxilium/arc-dsm/new/files/SA6400/7.4.1/18bebfc6579d142221d3a9168a1dd537.tar' \
+            -o /tmp/SA6400-18bebfc6579d142221d3a9168a1dd537.tar
+          curl -fL --retry 5 --retry-all-errors \
+            'https://raw.githubusercontent.com/AuxXxilium/arc-dsm/new/files/DS425%2B/7.4.1/ce4c2a93b83cdf98c276aeeb1f864b23.tar' \
+            -o /tmp/DS425plus-ce4c2a93b83cdf98c276aeeb1f864b23.tar
+          test -s /tmp/SA6400-18bebfc6579d142221d3a9168a1dd537.tar
+          test -s /tmp/DS425plus-ce4c2a93b83cdf98c276aeeb1f864b23.tar
+          tar -tf /tmp/SA6400-18bebfc6579d142221d3a9168a1dd537.tar | head -30
+          tar -tf /tmp/DS425plus-ce4c2a93b83cdf98c276aeeb1f864b23.tar | head -30
+
+      - name: Create SA6400 ready image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG='/tmp/out/Arc-4.0.0-SA6400-DSM-7.4.1-90080-TDAS.img'
+          cp --reflink=auto /tmp/base/arc.img "$IMG"
+          LOOP=$(sudo losetup -f)
+          sudo losetup -P "$LOOP" "$IMG"
+          mkdir -p /tmp/sa-p1 /tmp/sa-p3
+          cleanup() { sudo umount /tmp/sa-p1 2>/dev/null || true; sudo umount /tmp/sa-p3 2>/dev/null || true; sudo losetup -d "$LOOP" 2>/dev/null || true; }
+          trap cleanup EXIT
+          sudo mount "${LOOP}p1" /tmp/sa-p1
+          sudo mount "${LOOP}p3" /tmp/sa-p3
+
+          cat >/tmp/sa-user-config.yml <<'EOF'
+          model: "SA6400"
+          platform: "epyc7002"
+          productver: "7.4"
+          dsmfullver: "7.4.1"
+          buildnum: "90080"
+          smallnum: "0"
+          paturl: "https://global.download.synology.com/download/DSM/release/7.4.1/90080/DSM_SA6400_90080.pat"
+          pathash: "18bebfc6579d142221d3a9168a1dd537"
+          kernel: "official"
+          lkm: "prod"
+          usbmount: "false"
+          addons: {}
+          EOF
+          sed -i 's/^          //' /tmp/sa-user-config.yml
+          sudo cp -f /tmp/sa-user-config.yml /tmp/sa-p1/user-config.yml
+          echo 'arc-SA6400-7.4-4.0.0-TDAS' | sudo tee /tmp/sa-p3/automated >/dev/null
+          sudo mkdir -p /tmp/sa-p3/users
+          sudo cp -f /tmp/SA6400-18bebfc6579d142221d3a9168a1dd537.tar /tmp/sa-p3/users/18bebfc6579d142221d3a9168a1dd537.tar
+
+          for mode in dev prod; do
+            src="/tmp/arc-lkm/releases/rp-epyc7002-7.4-5.10.55-${mode}.ko.gz"
+            dst="/tmp/sa-p3/lkms/rp-epyc7002-7.4-5.10.55-${mode}.ko.gz"
+            sudo cp -f "$src" "$dst"
+            sudo chmod 0644 "$dst"
+            test "$(sha256sum "$src" | awk '{print $1}')" = "$(sudo sha256sum "$dst" | awk '{print $1}')"
+          done
+
+          echo '===== SA6400 CONFIG ====='
+          sudo cat /tmp/sa-p1/user-config.yml
+          echo '===== SA6400 AUTOMATED ====='
+          sudo cat /tmp/sa-p3/automated
+          echo '===== SA6400 CUSTOM LKM MARKER ====='
+          sudo gzip -dc /tmp/sa-p3/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz | strings | grep -E '2-3\.1\.4|USB internal' | head
+          sudo sync
+          cleanup
+          trap - EXIT
+          fdisk -l "$IMG"
+          sha256sum "$IMG" | tee "${IMG}.sha256"
+
+      - name: Create DS425+ ready image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMG='/tmp/out/Arc-4.0.0-DS425plus-DSM-7.4.1-90080-TDAS.img'
+          cp --reflink=auto /tmp/base/arc.img "$IMG"
+          LOOP=$(sudo losetup -f)
+          sudo losetup -P "$LOOP" "$IMG"
+          mkdir -p /tmp/ds-p1 /tmp/ds-p3
+          cleanup() { sudo umount /tmp/ds-p1 2>/dev/null || true; sudo umount /tmp/ds-p3 2>/dev/null || true; sudo losetup -d "$LOOP" 2>/dev/null || true; }
+          trap cleanup EXIT
+          sudo mount "${LOOP}p1" /tmp/ds-p1
+          sudo mount "${LOOP}p3" /tmp/ds-p3
+
+          cat >/tmp/ds-user-config.yml <<'EOF'
+          model: "DS425+"
+          platform: "geminilakenk"
+          productver: "7.4"
+          dsmfullver: "7.4.1"
+          buildnum: "90080"
+          smallnum: "0"
+          paturl: "https://global.download.synology.com/download/DSM/release/7.4.1/90080/DSM_DS425%2B_90080.pat"
+          pathash: "ce4c2a93b83cdf98c276aeeb1f864b23"
+          kernel: "official"
+          lkm: "prod"
+          usbmount: "false"
+          addons: {}
+          EOF
+          sed -i 's/^          //' /tmp/ds-user-config.yml
+          sudo cp -f /tmp/ds-user-config.yml /tmp/ds-p1/user-config.yml
+          echo 'arc-DS425plus-7.4-4.0.0-TDAS' | sudo tee /tmp/ds-p3/automated >/dev/null
+          sudo mkdir -p /tmp/ds-p3/users
+          sudo cp -f /tmp/DS425plus-ce4c2a93b83cdf98c276aeeb1f864b23.tar /tmp/ds-p3/users/ce4c2a93b83cdf98c276aeeb1f864b23.tar
+
+          for mode in dev prod; do
+            src="/tmp/arc-lkm/releases/rp-geminilakenk-7.4-5.10.55-${mode}.ko.gz"
+            dst="/tmp/ds-p3/lkms/rp-geminilakenk-7.4-5.10.55-${mode}.ko.gz"
+            sudo cp -f "$src" "$dst"
+            sudo chmod 0644 "$dst"
+            test "$(sha256sum "$src" | awk '{print $1}')" = "$(sudo sha256sum "$dst" | awk '{print $1}')"
+          done
+
+          echo '===== DS425+ CONFIG ====='
+          sudo cat /tmp/ds-p1/user-config.yml
+          echo '===== DS425+ AUTOMATED ====='
+          sudo cat /tmp/ds-p3/automated
+          echo '===== DS425+ CUSTOM LKM MARKER ====='
+          sudo gzip -dc /tmp/ds-p3/lkms/rp-geminilakenk-7.4-5.10.55-prod.ko.gz | strings | grep -E '2-3\.1\.4|USB internal' | head
+          sudo sync
+          cleanup
+          trap - EXIT
+          fdisk -l "$IMG"
+          sha256sum "$IMG" | tee "${IMG}.sha256"
+
+      - name: Final manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/out
+          echo '===== FINAL IMAGES ====='
+          ls -lh *.img *.sha256
+          cat *.sha256
+          sha256sum *.img > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload SA6400 image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arc-4.0.0-SA6400-DSM-7.4.1-90080-TDAS
+          path: |
+            /tmp/out/Arc-4.0.0-SA6400-DSM-7.4.1-90080-TDAS.img
+            /tmp/out/Arc-4.0.0-SA6400-DSM-7.4.1-90080-TDAS.img.sha256
+          compression-level: 6
+          retention-days: 7
+
+      - name: Upload DS425+ image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arc-4.0.0-DS425plus-DSM-7.4.1-90080-TDAS
+          path: |
+            /tmp/out/Arc-4.0.0-DS425plus-DSM-7.4.1-90080-TDAS.img
+            /tmp/out/Arc-4.0.0-DS425plus-DSM-7.4.1-90080-TDAS.img.sha256
+          compression-level: 6
+          retention-days: 7
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: Arc-4.0.0-TDAS-SHA256SUMS
+          path: /tmp/out/SHA256SUMS.txt
+          retention-days: 7
