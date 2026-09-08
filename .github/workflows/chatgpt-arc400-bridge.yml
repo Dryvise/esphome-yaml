@@ -1,4 +1,4 @@
-name: ChatGPT Arc 4.0.0 bridge
+name: ChatGPT Arc 4.0.0 inspect
 
 on:
   push:
@@ -6,10 +6,10 @@ on:
       - chatgpt/arc400-build
 
 jobs:
-  bridge:
+  inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Download and split official Arc 4.0.0 image
+      - name: Download official Arc 4.0.0 image
         shell: bash
         run: |
           set -euo pipefail
@@ -17,30 +17,24 @@ jobs:
             https://github.com/AuxXxilium/arc/releases/download/4.0.0/arc-4.0.0.img.zip \
             -o arc-4.0.0.img.zip
           echo 'd6310a975e41eb3520f36efb66b8dbb4f0c2298705e04421d722b4e56984dcae  arc-4.0.0.img.zip' | sha256sum -c -
-          split -b 400000000 -d -a 2 arc-4.0.0.img.zip arc400.part.
-          ls -lh arc400.part.*
-          test "$(ls arc400.part.* | wc -l)" -eq 3
+          unzip -q arc-4.0.0.img.zip
 
-      - name: Upload part 00
-        uses: actions/upload-artifact@v4
-        with:
-          name: arc400-part-00
-          path: arc400.part.00
-          compression-level: 0
-          retention-days: 1
-
-      - name: Upload part 01
-        uses: actions/upload-artifact@v4
-        with:
-          name: arc400-part-01
-          path: arc400.part.01
-          compression-level: 0
-          retention-days: 1
-
-      - name: Upload part 02
-        uses: actions/upload-artifact@v4
-        with:
-          name: arc400-part-02
-          path: arc400.part.02
-          compression-level: 0
-          retention-days: 1
+      - name: Inspect Arc partitions and config
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOOP=$(sudo losetup -f)
+          sudo losetup -P "$LOOP" arc.img
+          mkdir -p /tmp/p1 /tmp/p3
+          sudo mount "${LOOP}p1" /tmp/p1
+          sudo mount "${LOOP}p3" /tmp/p3
+          echo '===== P1 FILES ====='
+          sudo find /tmp/p1 -maxdepth 2 -type f -printf '%p\n' | sort | head -100
+          echo '===== USER CONFIG ====='
+          sudo cat /tmp/p1/user-config.yml || true
+          echo '===== MATCHING LKMS ====='
+          sudo find /tmp/p3/lkms -maxdepth 1 -type f \( -name '*epyc7002*' -o -name '*geminilakenk*' \) -printf '%f %s\n' | sort
+          echo '===== P3 TOP ====='
+          sudo find /tmp/p3 -maxdepth 2 -type f -printf '%p %s\n' | sort | head -120
+          sudo umount /tmp/p1 /tmp/p3
+          sudo losetup -d "$LOOP"
