@@ -9,7 +9,7 @@ jobs:
   bridge:
     runs-on: ubuntu-latest
     steps:
-      - name: Download official Arc 4.0.0 image
+      - name: Download and split official Arc 4.0.0 image
         shell: bash
         run: |
           set -euo pipefail
@@ -17,12 +17,30 @@ jobs:
             https://github.com/AuxXxilium/arc/releases/download/4.0.0/arc-4.0.0.img.zip \
             -o arc-4.0.0.img.zip
           echo 'd6310a975e41eb3520f36efb66b8dbb4f0c2298705e04421d722b4e56984dcae  arc-4.0.0.img.zip' | sha256sum -c -
-          ls -lh arc-4.0.0.img.zip
+          split -b 400000000 -d -a 2 arc-4.0.0.img.zip arc400.part.
+          ls -lh arc400.part.*
+          test "$(ls arc400.part.* | wc -l)" -eq 3
 
-      - name: Upload Arc image
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
         with:
-          name: arc400-base
-          path: arc-4.0.0.img.zip
+          name: arc400-part-00
+          path: arc400.part.00
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc400-part-01
+          path: arc400.part.01
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc400-part-02
+          path: arc400.part.02
           compression-level: 0
           retention-days: 1
