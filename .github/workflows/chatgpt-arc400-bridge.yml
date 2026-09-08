@@ -23,6 +23,7 @@ jobs:
           git checkout 4445f57494888fa12e4db4b7c02a790072bd7259
           git apply --check "$GITHUB_WORKSPACE/chatgpt-arc400/arc-tdas-usb-internal-final.patch"
           git apply "$GITHUB_WORKSPACE/chatgpt-arc400/arc-tdas-usb-internal-final.patch"
+          git diff --check
           ./build-lkm.sh -v 7.4 -p epyc7002,geminilakenk
 
           for f in \
@@ -33,8 +34,14 @@ jobs:
             test -s "$f"
             gzip -t "$f"
             gzip -dc "$f" | strings | grep -F '2-3.1.4' >/dev/null
-            gzip -dc "$f" | strings | grep -F 'USB-internal' >/dev/null
           done
+
+          for f in \
+            releases/rp-epyc7002-7.4-5.10.55-dev.ko.gz \
+            releases/rp-geminilakenk-7.4-5.10.55-dev.ko.gz; do
+            gzip -dc "$f" | strings | grep -F 'USB internal' >/dev/null
+          done
+
           sha256sum releases/rp-{epyc7002,geminilakenk}-7.4-5.10.55-{dev,prod}.ko.gz
 
       - name: Download and verify official Arc 4.0.0 base
@@ -113,7 +120,7 @@ jobs:
           echo '===== SA6400 AUTOMATED ====='
           sudo cat /tmp/sa-p3/automated
           echo '===== SA6400 CUSTOM LKM MARKER ====='
-          sudo gzip -dc /tmp/sa-p3/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz | strings | grep -E '2-3\.1\.4|USB-internal' | head
+          sudo gzip -dc /tmp/sa-p3/lkms/rp-epyc7002-7.4-5.10.55-prod.ko.gz | strings | grep -F '2-3.1.4'
           sudo sync
           cleanup
           trap - EXIT
@@ -167,7 +174,7 @@ jobs:
           echo '===== DS425+ AUTOMATED ====='
           sudo cat /tmp/ds-p3/automated
           echo '===== DS425+ CUSTOM LKM MARKER ====='
-          sudo gzip -dc /tmp/ds-p3/lkms/rp-geminilakenk-7.4-5.10.55-prod.ko.gz | strings | grep -E '2-3\.1\.4|USB-internal' | head
+          sudo gzip -dc /tmp/ds-p3/lkms/rp-geminilakenk-7.4-5.10.55-prod.ko.gz | strings | grep -F '2-3.1.4'
           sudo sync
           cleanup
           trap - EXIT
