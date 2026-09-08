@@ -1,0 +1,28 @@
+name: ChatGPT Arc 4.0.0 bridge
+
+on:
+  push:
+    branches:
+      - chatgpt/arc400-build
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download official Arc 4.0.0 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-all-errors \
+            https://github.com/AuxXxilium/arc/releases/download/4.0.0/arc-4.0.0.img.zip \
+            -o arc-4.0.0.img.zip
+          echo 'd6310a975e41eb3520f36efb66b8dbb4f0c2298705e04421d722b4e56984dcae  arc-4.0.0.img.zip' | sha256sum -c -
+          ls -lh arc-4.0.0.img.zip
+
+      - name: Upload Arc image
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc400-base
+          path: arc-4.0.0.img.zip
+          compression-level: 0
+          retention-days: 1
