@@ -1,4 +1,4 @@
-name: ChatGPT Arc 4.0.0 inspect
+name: ChatGPT Arc target check
 
 on:
   push:
@@ -6,35 +6,27 @@ on:
       - chatgpt/arc400-build
 
 jobs:
-  inspect:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Download official Arc 4.0.0 image
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fL --retry 5 --retry-all-errors \
-            https://github.com/AuxXxilium/arc/releases/download/4.0.0/arc-4.0.0.img.zip \
-            -o arc-4.0.0.img.zip
-          echo 'd6310a975e41eb3520f36efb66b8dbb4f0c2298705e04421d722b4e56984dcae  arc-4.0.0.img.zip' | sha256sum -c -
-          unzip -q arc-4.0.0.img.zip
+      - name: Checkout Arc 4.0.0 source
+        uses: actions/checkout@v4
+        with:
+          repository: AuxXxilium/arc
+          ref: f46e1f95fa147486516f97a804ad633829a45a98
 
-      - name: Inspect Arc partitions and config
+      - name: Install Python requirements
         shell: bash
         run: |
           set -euo pipefail
-          LOOP=$(sudo losetup -f)
-          sudo losetup -P "$LOOP" arc.img
-          mkdir -p /tmp/p1 /tmp/p3
-          sudo mount "${LOOP}p1" /tmp/p1
-          sudo mount "${LOOP}p3" /tmp/p3
-          echo '===== P1 FILES ====='
-          sudo find /tmp/p1 -maxdepth 2 -type f -printf '%p\n' | sort | head -100
-          echo '===== USER CONFIG ====='
-          sudo cat /tmp/p1/user-config.yml || true
-          echo '===== MATCHING LKMS ====='
-          sudo find /tmp/p3/lkms -maxdepth 1 -type f \( -name '*epyc7002*' -o -name '*geminilakenk*' \) -printf '%f %s\n' | sort
-          echo '===== P3 TOP ====='
-          sudo find /tmp/p3 -maxdepth 2 -type f -printf '%p %s\n' | sort | head -120
-          sudo umount /tmp/p1 /tmp/p3
-          sudo losetup -d "$LOOP"
+          python3 -m pip install --user -r scripts/requirements.txt
+
+      - name: Check exact DSM target for both models
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '===== SA6400 / 7.4.1-90080 ====='
+          python3 scripts/functions.py getpats4mv -m 'SA6400' -v '7.4.1-90080'
+          echo
+          echo '===== DS425+ / 7.4.1-90080 ====='
+          python3 scripts/functions.py getpats4mv -m 'DS425+' -v '7.4.1-90080'
