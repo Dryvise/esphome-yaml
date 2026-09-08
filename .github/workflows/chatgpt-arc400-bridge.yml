@@ -25,8 +25,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo '===== SA6400 / 7.4.1-90080 ====='
-          python3 scripts/functions.py getpats4mv -m 'SA6400' -v '7.4.1-90080'
+          echo '===== SA6400 / 7.4.1-90080-0 ====='
+          python3 scripts/functions.py getpats4mv -m 'SA6400' -v '7.4.1-90080-0'
           echo
-          echo '===== DS425+ / 7.4.1-90080 ====='
-          python3 scripts/functions.py getpats4mv -m 'DS425+' -v '7.4.1-90080'
+          echo '===== DS425+ / 7.4.1-90080-0 ====='
+          python3 scripts/functions.py getpats4mv -m 'DS425+' -v '7.4.1-90080-0'
