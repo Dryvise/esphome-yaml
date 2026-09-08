@@ -1,0 +1,193 @@
+diff --git a/shim/storage/sata_port_shim.c b/shim/storage/sata_port_shim.c
+index 383fb44..810dee8 100755
+--- a/shim/storage/sata_port_shim.c
++++ b/shim/storage/sata_port_shim.c
+@@ -38,12 +38,18 @@
+ #include <scsi/scsi_host.h> //struct Scsi_Host, SYNO_PORT_TYPE_*
+ #include <linux/pci.h> //struct pci_dev, to_pci_dev()
+ #include <linux/ctype.h> //isprint()
++#include <linux/device.h> //devm_kmemdup()
++#include <linux/string.h>
+ #include "../../config/runtime_config.h"
+ #include "../../config/platform_types.h"
+ 
+ #define SHIM_NAME "SATA port emulator"
+ #define VIRTIO_HOST_ID "Virtio SCSI HBA"
+ 
++/* TerraMaster F8 internal TDAS bridge: physical USB topology path. */
++#define USB_INTERNAL_PATH "2-3.1.4"
++#define USB_INTERNAL_ATA_PORT 0
++
+ /* Some kernels/platform headers do not provide struct scsi_device::syno_block_info. */
+ #ifdef BLOCK_INFO_SIZE
+ #define RP_HAS_SYNO_BLOCK_INFO 1
+@@ -115,6 +121,67 @@ static bool host_pci_parent_is_storage(const struct Scsi_Host *host)
+     return false;
+ }
+ 
++/*
++ * Match only the SCSI host below the physical TerraMaster TDAS USB path.
++ * dev_name() on the parent chain contains both "2-3.1.4" and
++ * "2-3.1.4:1.0" (the UAS interface).
++ */
++static bool is_usb_internal_target(const struct scsi_device *sdp)
++{
++    struct device *dev;
++    const size_t path_len = strlen(USB_INTERNAL_PATH);
++
++    if (unlikely(!sdp || !sdp->host))
++        return false;
++
++    dev = sdp->host->shost_gendev.parent;
++    while (dev) {
++        const char *name = dev_name(dev);
++
++        if (name &&
++            (!strcmp(name, USB_INTERNAL_PATH) ||
++             (!strncmp(name, USB_INTERNAL_PATH, path_len) && name[path_len] == ':')))
++            return true;
++
++        dev = dev->parent;
++    }
++
++    return false;
++}
++
++/*
++ * Never modify the global UAS/usb-storage host template.  Clone it for the
++ * target Scsi_Host only, so the Arc boot USB (1-3/host0) and all other USB
++ * storage keep their original Synology port type.
++ */
++static int prepare_usb_internal_host(struct scsi_device *sdp)
++{
++    struct scsi_host_template *private_hostt;
++
++    if (!is_usb_internal_target(sdp))
++        return 0;
++
++    if (sdp->host->hostt->syno_port_type == SYNO_PORT_TYPE_SATA)
++        return 0;
++
++    private_hostt = devm_kmemdup(&sdp->host->shost_gendev,
++                                 sdp->host->hostt,
++                                 sizeof(*private_hostt),
++                                 GFP_KERNEL);
++    if (unlikely(!private_hostt)) {
++        pr_loc_err("USB internal: failed to clone SCSI host template for path %s",
++                   USB_INTERNAL_PATH);
++        return -ENOMEM;
++    }
++
++    private_hostt->syno_port_type = SYNO_PORT_TYPE_SATA;
++    sdp->host->hostt = private_hostt;
++
++    pr_loc_inf("USB internal: host%d path=%s cloned and changed to SATA port type",
++               sdp->host->host_no, USB_INTERNAL_PATH);
++    return 0;
++}
++
+ #if RP_HAS_SYNO_BLOCK_INFO
+ static const char *resolve_syno_pciepath(struct device *pci_dev, char *out_buf, size_t out_len)
+ {
+@@ -203,6 +270,7 @@ static void populate_syno_block_info_if_needed(struct scsi_device *sdp)
+     const char *pciepath;
+     unsigned int ata_port_no;
+     char dts_pciepath[128];
++    const bool usb_internal = is_usb_internal_target(sdp);
+ 
+     if (!current_config.hw_config || !current_config.hw_config->is_dt)
+         return;
+@@ -210,7 +278,8 @@ static void populate_syno_block_info_if_needed(struct scsi_device *sdp)
+     /* Only non-libata DT disks on PCI storage controllers need this.
+      * host_pci_parent_is_storage() (class 0x01) excludes USB host controllers (class 0x0C)
+      * which would otherwise also pass host_has_pci_parent() and get a fake ahci syno_block_info. */
+-    if (host_uses_libata(sdp->host) || !host_pci_parent_is_storage(sdp->host))
++    if (host_uses_libata(sdp->host) ||
++        (!usb_internal && !host_pci_parent_is_storage(sdp->host)))
+         return;
+ 
+     /*
+@@ -219,7 +288,7 @@ static void populate_syno_block_info_if_needed(struct scsi_device *sdp)
+      * host_uses_libata allowlist would have their driver-set syno_block_info replaced with
+      * our approximate values, causing wrong slot assignments and invisible disks in SM.
+      */
+-    if (sdp->syno_block_info[0] != '\0')
++    if (!usb_internal && sdp->syno_block_info[0] != '\0')
+         return;
+ 
+     /* Walk up the device-parent chain until we land on a PCI device */
+@@ -252,12 +321,22 @@ static void populate_syno_block_info_if_needed(struct scsi_device *sdp)
+      * Prefer explicit HBA port index from topology node name (port-H:P).
+      * Fall back to SCSI target ID if topology does not expose a port node.
+      */
+-    ata_port_no = sdp->id;
+-    if (!resolve_hba_port_no(sdp, &ata_port_no))
+-        pr_loc_dbg("No port-H:P node for /dev/%s; falling back to sdp->id=%u",
+-                   sdp->syno_disk_name, sdp->id);
+-
+-    pciepath = resolve_syno_pciepath(dev, dts_pciepath, sizeof(dts_pciepath));
++    if (usb_internal) {
++        /*
++         * Use the xHCI PCI BDF as a stable synthetic controller.  The Arc DT
++         * disks addon consumes pciepath/ata_port_no/driver for slot mapping;
++         * this does not require the physical controller to be AHCI.
++         */
++        ata_port_no = USB_INTERNAL_ATA_PORT;
++        pciepath = dev_name(dev);
++    } else {
++        ata_port_no = sdp->id;
++        if (!resolve_hba_port_no(sdp, &ata_port_no))
++            pr_loc_dbg("No port-H:P node for /dev/%s; falling back to sdp->id=%u",
++                       sdp->syno_disk_name, sdp->id);
++
++        pciepath = resolve_syno_pciepath(dev, dts_pciepath, sizeof(dts_pciepath));
++    }
+ 
+     /*
+      * Prefer Synology DTS pciepath format when helper symbol is available.
+@@ -295,6 +374,9 @@ static bool is_fixable(struct scsi_device *sdp)
+     if (unlikely(!sdp || !sdp->host || !sdp->host->hostt))
+         return false;
+ 
++    if (is_usb_internal_target(sdp))
++        return true;
++
+     const char *host_name = sdp->host->hostt->name;
+     const bool uses_libata = host_uses_libata(sdp->host);
+     const bool non_sata_port = sdp->host->hostt->syno_port_type != SYNO_PORT_TYPE_SATA;
+@@ -333,9 +415,17 @@ static bool is_fixable(struct scsi_device *sdp)
+  */
+ static int on_new_scsi_disk_device(struct scsi_device *sdp)
+ {
++    int out;
++
+     if (!is_fixable(sdp))
+         return 0;
+ 
++    if (is_usb_internal_target(sdp)) {
++        out = prepare_usb_internal_host(sdp);
++        if (unlikely(out != 0))
++            return out;
++    }
++
+     // DT-mode PCI-storage HBA disks (is_pci_storage_scsi) are fixed here too, same as SAS/VirtIO.
+     // This means their syno_port_type is SATA before sd_probe() runs, so sd.c assigns them sataN
+     // naming/slot mapping uniformly with native SATA disks instead of falling back to sdX/sasN.
+@@ -363,9 +453,17 @@ static int on_new_scsi_disk_device(struct scsi_device *sdp)
+  */
+ static int on_existing_scsi_disk_device(struct scsi_device *sdp)
+ {
++    int out;
++
+     if (!is_fixable(sdp))
+         return 0;
+ 
++    if (is_usb_internal_target(sdp)) {
++        out = prepare_usb_internal_host(sdp);
++        if (unlikely(out != 0))
++            return out;
++    }
++
+     pr_loc_dbg(
+             "Found initialized disk vendor=\"%s\" model=\"%s\" connected to \"%s\" HBA over non-SATA port (type=%d)."
+             " It must be auto-replugged to fix it.", sdp->vendor, sdp->model, sdp->host->hostt->name,
