@@ -1,0 +1,257 @@
+name: Arc 4.1 USB internal build
+
+on:
+  push:
+    branches:
+      - arc41-usb-internal-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-and-build-lkm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout workspace
+        uses: actions/checkout@v4
+
+      - name: Prepare tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip curl xz-utils gzip util-linux parted file
+          mkdir -p work/out work/mnt1 work/mnt2 work/mnt3
+
+      - name: Checkout Arc RedPill LKM source
+        run: |
+          git clone https://github.com/AuxXxilium/redpill-lkm5.git work/redpill-lkm5
+          cd work/redpill-lkm5
+          git checkout 680c5aed53ce0b7d16c6bd559f426b36f93f32c8
+
+      - name: Install targeted USB-to-SATA shim
+        run: |
+          cat > work/redpill-lkm5/shim/storage/sata_port_shim.c <<'EOF'
+          /**
+           * SATA port shim with one physical USB topology exception.
+           * Only USB 2-3.1.4 is reclassified. Global USB/UAS templates stay unchanged.
+           */
+          #include "sata_port_shim.h"
+          #include "../shim_base.h"
+          #include "../../common.h"
+          #include "../../internal/scsi/scsi_toolbox.h"
+          #include "../../internal/scsi/scsi_notifier.h"
+          #include "../../config/runtime_config.h"
+          #include "../../config/platform_types.h"
+          #include <linux/device.h>
+          #include <linux/pci.h>
+          #include <linux/slab.h>
+          #include <linux/string.h>
+          #include <scsi/scsi_device.h>
+          #include <scsi/scsi_host.h>
+
+          #define SHIM_NAME "SATA port emulator"
+          #define VIRTIO_HOST_ID "Virtio SCSI HBA"
+          #define TARGET_USB_PATH "2-3.1.4"
+
+          static struct device *find_target_usb_device(struct scsi_device *sdp)
+          {
+              struct device *dev;
+              if (!sdp || !sdp->host)
+                  return NULL;
+              dev = sdp->host->shost_gendev.parent;
+              while (dev) {
+                  if (dev_name(dev) && !strcmp(dev_name(dev), TARGET_USB_PATH))
+                      return dev;
+                  dev = dev->parent;
+              }
+              return NULL;
+          }
+
+          static struct pci_dev *find_parent_pci_device(struct device *dev)
+          {
+              while (dev) {
+                  if (dev->bus && dev->bus->name && !strcmp(dev->bus->name, "pci"))
+                      return to_pci_dev(dev);
+                  dev = dev->parent;
+              }
+              return NULL;
+          }
+
+          static bool is_target_usb(struct scsi_device *sdp)
+          {
+              return find_target_usb_device(sdp) != NULL;
+          }
+
+          static void target_usb_sdev_info_enum(struct scsi_device *sdp)
+          {
+              struct device *usbdev;
+              struct pci_dev *pdev;
+
+              if (!sdp)
+                  return;
+              usbdev = find_target_usb_device(sdp);
+              if (!usbdev)
+                  return;
+              pdev = find_parent_pci_device(usbdev);
+              if (!pdev) {
+                  pr_loc_err("Target USB %s has no parent PCI/xHCI controller", TARGET_USB_PATH);
+                  return;
+              }
+
+              sdp->syno_block_info[0] = '\0';
+              scnprintf(sdp->syno_block_info, BLOCK_INFO_SIZE,
+                        "pciepath=%s\nata_port_no=0\ndriver=ahci\n", pci_name(pdev));
+          }
+
+          static int prepare_target_usb_host(struct scsi_device *sdp)
+          {
+              struct scsi_host_template *private_hostt;
+
+              if (!is_target_usb(sdp))
+                  return 0;
+              if (sdp->host->hostt->syno_port_type == SYNO_PORT_TYPE_SATA &&
+                  sdp->host->hostt->syno_sdev_info_enum == target_usb_sdev_info_enum)
+                  return 0;
+
+              private_hostt = devm_kmemdup(&sdp->host->shost_gendev,
+                                           sdp->host->hostt,
+                                           sizeof(*sdp->host->hostt),
+                                           GFP_KERNEL);
+              if (!private_hostt)
+                  return -ENOMEM;
+
+              private_hostt->syno_port_type = SYNO_PORT_TYPE_SATA;
+              private_hostt->syno_sdev_info_enum = target_usb_sdev_info_enum;
+              sdp->host->hostt = private_hostt;
+              pr_loc_inf("USB %s host privately reclassified as SATA", TARGET_USB_PATH);
+              return 0;
+          }
+
+          static bool is_fixable(struct scsi_device *sdp)
+          {
+              if (is_target_usb(sdp))
+                  return true;
+              return sdp->host->hostt->syno_port_type == SYNO_PORT_TYPE_SAS ||
+                     (current_config.hw_config->is_dt == false &&
+                      sdp->host->hostt->syno_port_type != SYNO_PORT_TYPE_SATA &&
+                      !strcmp(sdp->host->hostt->name, VIRTIO_HOST_ID));
+          }
+
+          static int on_new_scsi_disk_device(struct scsi_device *sdp)
+          {
+              if (!is_fixable(sdp))
+                  return 0;
+              if (is_target_usb(sdp))
+                  return prepare_target_usb_host(sdp);
+
+              pr_loc_dbg("Found new disk vendor=\"%s\" model=\"%s\" connected to \"%s\" HBA over non-SATA port (type=%d) - fixing to SATA port (type=%d)",
+                         sdp->vendor, sdp->model, sdp->host->hostt->name,
+                         sdp->host->hostt->syno_port_type, SYNO_PORT_TYPE_SATA);
+              sdp->host->hostt->syno_port_type = SYNO_PORT_TYPE_SATA;
+              return 0;
+          }
+
+          static int on_existing_scsi_disk_device(struct scsi_device *sdp)
+          {
+              int out;
+              if (!is_fixable(sdp))
+                  return 0;
+
+              if (is_target_usb(sdp)) {
+                  out = prepare_target_usb_host(sdp);
+                  if (out)
+                      return out;
+              }
+
+              scsi_force_replug(sdp);
+              return 0;
+          }
+
+          static int scsi_disk_probe_handler(struct notifier_block *self,
+                                             unsigned long state, void *data)
+          {
+              if (state != SCSI_EVT_DEV_PROBING)
+                  return NOTIFY_DONE;
+              on_new_scsi_disk_device(data);
+              return NOTIFY_OK;
+          }
+
+          static struct notifier_block scsi_disk_nb = {
+              .notifier_call = scsi_disk_probe_handler,
+              .priority = INT_MIN,
+          };
+
+          int register_sata_port_shim(void)
+          {
+              int out;
+              shim_reg_in();
+              out = subscribe_scsi_disk_events(&scsi_disk_nb);
+              if (unlikely(out != 0))
+                  return out;
+              out = for_each_scsi_disk(on_existing_scsi_disk_device);
+              if (unlikely(out != 0 && out != -ENXIO))
+                  return out;
+              shim_reg_ok();
+              return 0;
+          }
+
+          int unregister_sata_port_shim(void)
+          {
+              shim_ureg_in();
+              unsubscribe_scsi_disk_events(&scsi_disk_nb);
+              shim_ureg_ok();
+              return 0;
+          }
+          EOF
+
+      - name: Compile epyc7002 LKM
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/work/out"
+          docker pull fbelavenuto/syno-compiler:7.2
+          docker run --rm             -v "$GITHUB_WORKSPACE/work/redpill-lkm5:/input"             -v "$GITHUB_WORKSPACE/work/out:/output"             fbelavenuto/syno-compiler:7.2 compile-lkm epyc7002
+          ls -lah work/out
+          file work/out/redpill-*.ko
+          sha256sum work/out/redpill-*.ko | tee work/lkm-sha256.txt
+
+      - name: Download official Arc 4.1.0
+        run: |
+          cd work
+          curl -fL --retry 5 --retry-delay 3 -o arc-4.1.0.img.zip             https://github.com/AuxXxilium/arc/releases/download/4.1.0/arc-4.1.0.img.zip
+          echo "1fd22da7b02615a85cb68763bf17e27af204c6139c44070c33f414945a5f82d1  arc-4.1.0.img.zip" | sha256sum -c -
+          unzip -o arc-4.1.0.img.zip
+          IMG="$(find . -maxdepth 1 -type f -name '*.img' | head -1)"
+          test -n "$IMG"
+          echo "IMG=$GITHUB_WORKSPACE/work/${IMG#./}" >> "$GITHUB_ENV"
+          ls -lh "$IMG"
+          fdisk -l "$IMG" | tee image-partitions.txt
+
+      - name: Inspect Arc partitions
+        run: |
+          LOOP="$(sudo losetup --find --show --partscan "$IMG")"
+          sleep 2
+          lsblk -f "$LOOP" | tee work/lsblk.txt
+          for N in 1 2 3; do
+            DEV="${LOOP}p${N}"
+            MNT="$GITHUB_WORKSPACE/work/mnt${N}"
+            if [ -b "$DEV" ]; then
+              sudo mount -o ro "$DEV" "$MNT"
+              echo "===== PARTITION $N =====" | tee -a work/inventory.txt
+              sudo find "$MNT" -maxdepth 6 -type f -printf '%P\n' | sort | head -3000 | tee -a work/inventory.txt
+              sudo umount "$MNT"
+            fi
+          done
+          sudo losetup -d "$LOOP"
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc41-diagnostic
+          path: |
+            work/inventory.txt
+            work/lsblk.txt
+            work/image-partitions.txt
+            work/lkm-sha256.txt
+            work/out/redpill-dev.ko
+            work/out/redpill-prod.ko
+          if-no-files-found: warn
