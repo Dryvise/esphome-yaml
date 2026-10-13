@@ -277,20 +277,26 @@ jobs:
           for MODE in dev prod; do
             SRC="$GITHUB_WORKSPACE/work/out/redpill-${MODE}.ko"
             test -s "$SRC"
-            TARGET="$(find "$ROOT/lkms" -maxdepth 1 -type f -name "rp-epyc7002-*5.10.55*-${MODE}.ko.gz" | head -1)"
-            if [ -z "$TARGET" ]; then
-              TARGET="$(find "$ROOT/lkms" -maxdepth 1 -type f -name "rp-epyc7002-*-${MODE}.ko.gz" | head -1)"
-            fi
-            test -n "$TARGET"
             gzip -9 -c "$SRC" > "/tmp/rp-${MODE}.ko.gz"
-            sudo cp -f "/tmp/rp-${MODE}.ko.gz" "$TARGET"
-            echo "Replaced: $TARGET"
+            N=0
+            for TARGET in "$ROOT"/lkms/rp-epyc7002-7.*-5.10.55-${MODE}.ko.gz; do
+              [ -f "$TARGET" ] || continue
+              sudo cp -f "/tmp/rp-${MODE}.ko.gz" "$TARGET"
+              echo "Replaced: $TARGET"
+              N=$((N + 1))
+            done
+            [ "$N" -eq 3 ]
           done
 
-          DISKS="$ROOT/addons/disks/all/usr/bin/disks.sh"
+          DISKS_TGZ="$ROOT/addons/disks/all.tgz"
+          test -f "$DISKS_TGZ"
+          rm -rf /tmp/disks-addon
+          mkdir -p /tmp/disks-addon
+          sudo tar -xaf "$DISKS_TGZ" -C /tmp/disks-addon
+          sudo chown -R "$USER":"$USER" /tmp/disks-addon
+          DISKS="$(find /tmp/disks-addon -type f -path '*/usr/bin/disks.sh' | head -1)"
           test -f "$DISKS"
-          sudo cp "$DISKS" /tmp/disks.sh
-          sudo chown "$USER":"$USER" /tmp/disks.sh
+          cp "$DISKS" /tmp/disks.sh
 
           python3 <<'PY'
           from pathlib import Path
@@ -349,13 +355,19 @@ jobs:
           print(f"patched USB filters={n_usb}, class filters={n_class}, dtUpdate filters={n_count}")
           PY
 
-          sudo cp -f /tmp/disks.sh "$DISKS"
-          sudo chmod 0755 "$DISKS"
+          cp -f /tmp/disks.sh "$DISKS"
+          chmod 0755 "$DISKS"
 
           echo "Verifying exact target patch:"
-          sudo grep -n -A8 -B2 '_is_target_internal_usb_pp' "$DISKS" | head -100
+          grep -n -A8 -B2 '_is_target_internal_usb_pp' "$DISKS" | head -100
+
+          tar -C /tmp/disks-addon -czf /tmp/disks-all.tgz .
+          sudo cp -f /tmp/disks-all.tgz "$DISKS_TGZ"
+
           echo "LKM files:"
-          sudo ls -lh "$ROOT/lkms/"rp-epyc7002-*5.10.55*-*.ko.gz
+          sudo ls -lh "$ROOT/lkms/"rp-epyc7002-7.*-5.10.55-*.ko.gz
+          echo "Patched disks addon:"
+          sudo ls -lh "$DISKS_TGZ"
 
           sync
           for N in 1 2 3; do
