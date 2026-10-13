@@ -59,6 +59,16 @@ jobs:
               struct device *dev;
               if (!sdp || !sdp->host)
                   return NULL;
+              /* UAS and usb-storage do not expose the same host parent
+               * topology on every kernel.  Search the SCSI device ancestry
+               * first, then the host ancestry. */
+              dev = &sdp->sdev_gendev;
+              while (dev) {
+                  if (dev_name(dev) && !strcmp(dev_name(dev), TARGET_USB_PATH))
+                      return dev;
+                  dev = dev->parent;
+              }
+
               dev = sdp->host->shost_gendev.parent;
               while (dev) {
                   if (dev_name(dev) && !strcmp(dev_name(dev), TARGET_USB_PATH))
@@ -124,7 +134,7 @@ jobs:
               private_hostt->syno_port_type = SYNO_PORT_TYPE_SATA;
               private_hostt->syno_sdev_info_enum = target_usb_sdev_info_enum;
               sdp->host->hostt = private_hostt;
-              pr_loc_inf("USB %s host privately reclassified as SATA", TARGET_USB_PATH);
+              pr_loc_dbg("USB %s host privately reclassified as SATA", TARGET_USB_PATH);
               return 0;
           }
 
