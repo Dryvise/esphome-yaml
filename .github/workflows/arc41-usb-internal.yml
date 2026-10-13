@@ -20,7 +20,7 @@ jobs:
       - name: Prepare tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y unzip curl xz-utils gzip util-linux parted file
+          sudo apt-get install -y unzip zip curl xz-utils gzip util-linux parted file
           mkdir -p work/out work/mnt1 work/mnt2 work/mnt3
 
       - name: Checkout Arc RedPill LKM source
@@ -218,6 +218,7 @@ jobs:
       - name: Compile epyc7002 LKM
         run: |
           mkdir -p "$GITHUB_WORKSPACE/work/out"
+          chmod 0777 "$GITHUB_WORKSPACE/work/out"
           docker pull fbelavenuto/syno-compiler:7.2
           docker run --rm             -v "$GITHUB_WORKSPACE/work/redpill-lkm5:/input"             -v "$GITHUB_WORKSPACE/work/out:/output"             fbelavenuto/syno-compiler:7.2 compile-lkm epyc7002
           ls -lah work/out
@@ -253,10 +254,128 @@ jobs:
           done
           sudo losetup -d "$LOOP"
 
+
+      - name: Patch Arc image and package final build
+        run: |
+          LOOP="$(sudo losetup --find --show --partscan "$IMG")"
+          trap 'for M in "$GITHUB_WORKSPACE"/work/rw*; do mountpoint -q "$M" && sudo umount "$M" || true; done; sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+          ROOT=""
+          for N in 1 2 3; do
+            DEV="${LOOP}p${N}"
+            MNT="$GITHUB_WORKSPACE/work/rw${N}"
+            mkdir -p "$MNT"
+            if [ -b "$DEV" ]; then
+              sudo mount "$DEV" "$MNT"
+              if [ -d "$MNT/lkms" ] && [ -d "$MNT/addons" ]; then
+                ROOT="$MNT"
+              fi
+            fi
+          done
+          test -n "$ROOT"
+          echo "Arc data partition: $ROOT"
+
+          for MODE in dev prod; do
+            SRC="$GITHUB_WORKSPACE/work/out/redpill-${MODE}.ko"
+            test -s "$SRC"
+            TARGET="$(find "$ROOT/lkms" -maxdepth 1 -type f -name "rp-epyc7002-*5.10.55*-${MODE}.ko.gz" | head -1)"
+            if [ -z "$TARGET" ]; then
+              TARGET="$(find "$ROOT/lkms" -maxdepth 1 -type f -name "rp-epyc7002-*-${MODE}.ko.gz" | head -1)"
+            fi
+            test -n "$TARGET"
+            gzip -9 -c "$SRC" > "/tmp/rp-${MODE}.ko.gz"
+            sudo cp -f "/tmp/rp-${MODE}.ko.gz" "$TARGET"
+            echo "Replaced: $TARGET"
+          done
+
+          DISKS="$ROOT/addons/disks/all/usr/bin/disks.sh"
+          test -f "$DISKS"
+          sudo cp "$DISKS" /tmp/disks.sh
+          sudo chown "$USER":"$USER" /tmp/disks.sh
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("/tmp/disks.sh")
+          s = p.read_text()
+
+          helper = r'''
+          # One deliberately internal USB disk.  Match physical topology only;
+          # no VID/PID matching and no global USB reclassification.
+          _is_target_internal_usb_pp() {
+            case "${1}" in
+              *"/2-3.1.4/"*|*"/2-3.1.4") return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          '''
+          anchor = "_disk_info() {"
+          if "_is_target_internal_usb_pp()" not in s:
+              assert anchor in s, "disk_info anchor missing"
+              s = s.replace(anchor, helper + anchor, 1)
+
+          usb_filter = '      case "${_PP}" in *usb*) continue ;; esac'
+          usb_repl = '''      if _is_target_internal_usb_pp "${_PP}"; then
+                _TARGET_USB_INTERNAL=true
+              else
+                _TARGET_USB_INTERNAL=false
+                case "${_PP}" in *usb*) continue ;; esac
+              fi'''
+          n_usb = s.count(usb_filter)
+          assert n_usb >= 2, f"expected >=2 USB filters, found {n_usb}"
+          s = s.replace(usb_filter, usb_repl)
+
+          class_filter = '      case "${_CL}" in 0x01*) : ;; *) _log "not a storage controller: ${_F} [${_CL:-unknown}]"; continue ;; esac'
+          class_repl = '''      case "${_CL}" in
+                0x01*) : ;;
+                0x0c*) [ "${_TARGET_USB_INTERNAL:-false}" = true ] || { _log "not a storage controller: ${_F} [${_CL:-unknown}]"; continue; } ;;
+                *) _log "not a storage controller: ${_F} [${_CL:-unknown}]"; continue ;;
+              esac'''
+          n_class = s.count(class_filter)
+          assert n_class >= 1, f"storage class filter missing"
+          s = s.replace(class_filter, class_repl)
+
+          count_filter = '          case "$(cat "/sys/bus/pci/devices/${_BDF}/class" 2>/dev/null)" in 0x01*) : ;; *) continue ;; esac'
+          count_repl = '''          case "$(cat "/sys/bus/pci/devices/${_BDF}/class" 2>/dev/null)" in
+                    0x01*) : ;;
+                    0x0c*) [ "${_TARGET_USB_INTERNAL:-false}" = true ] || continue ;;
+                    *) continue ;;
+                  esac'''
+          n_count = s.count(count_filter)
+          assert n_count >= 1, f"dtUpdate class filter missing"
+          s = s.replace(count_filter, count_repl)
+
+          p.write_text(s)
+          print(f"patched USB filters={n_usb}, class filters={n_class}, dtUpdate filters={n_count}")
+          PY
+
+          sudo cp -f /tmp/disks.sh "$DISKS"
+          sudo chmod 0755 "$DISKS"
+
+          echo "Verifying exact target patch:"
+          sudo grep -n -A8 -B2 '_is_target_internal_usb_pp' "$DISKS" | head -100
+          echo "LKM files:"
+          sudo ls -lh "$ROOT/lkms/"rp-epyc7002-*5.10.55*-*.ko.gz
+
+          sync
+          for N in 1 2 3; do
+            MNT="$GITHUB_WORKSPACE/work/rw${N}"
+            mountpoint -q "$MNT" && sudo umount "$MNT" || true
+          done
+          sudo losetup -d "$LOOP"
+          trap - EXIT
+
+          mkdir -p "$GITHUB_WORKSPACE/work/final"
+          sha256sum "$IMG" | tee "$GITHUB_WORKSPACE/work/final/arc-4.1.0-usb-2-3.1.4-internal.img.sha256"
+          cd "$(dirname "$IMG")"
+          zip -1 "$GITHUB_WORKSPACE/work/final/arc-4.1.0-usb-2-3.1.4-internal.img.zip" "$(basename "$IMG")"
+          cd "$GITHUB_WORKSPACE"
+          sha256sum work/final/arc-4.1.0-usb-2-3.1.4-internal.img.zip | tee work/final/arc-4.1.0-usb-2-3.1.4-internal.img.zip.sha256
+
       - name: Upload diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: arc41-diagnostic
+          name: arc-4.1.0-usb-2-3.1.4-internal
           path: |
             work/inventory.txt
             work/lsblk.txt
@@ -264,4 +383,7 @@ jobs:
             work/lkm-sha256.txt
             work/out/redpill-dev.ko
             work/out/redpill-prod.ko
-          if-no-files-found: warn
+            work/final/arc-4.1.0-usb-2-3.1.4-internal.img.zip
+            work/final/arc-4.1.0-usb-2-3.1.4-internal.img.sha256
+            work/final/arc-4.1.0-usb-2-3.1.4-internal.img.zip.sha256
+          if-no-files-found: error
